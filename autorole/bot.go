@@ -237,6 +237,7 @@ func iterateGuildChunkMembers(guildID int64, config *GeneralConfig, chunk *disco
 	if err != nil {
 		logger.WithError(err).Error("Failed marking full scan iterating")
 	}
+	logger.Info(fmt.Sprintf("Started iterating over %d members", len(chunk.Members)))
 
 	for _, m := range chunk.Members {
 
@@ -254,11 +255,13 @@ func iterateGuildChunkMembers(guildID int64, config *GeneralConfig, chunk *disco
 		}
 
 		if !config.CanAssignTo(m.Roles, joinedAt) {
+			logger.Info(fmt.Sprintf("Cannot assign role to %s", m.User.Username))
 			continue
 		}
 
 		// already has role
 		if common.ContainsInt64Slice(m.Roles, config.Role) {
+			logger.Info(fmt.Sprintf("%s already has the role", m.User.Username))
 			continue
 		}
 
@@ -266,6 +269,7 @@ func iterateGuildChunkMembers(guildID int64, config *GeneralConfig, chunk *disco
 		if err != nil {
 			logger.WithError(err).Error("Failed adding user to the set")
 		}
+		logger.Info(fmt.Sprintf("Added %s to set", m.User.Username))
 
 		if time.Since(lastTimeFullScanStatusRefreshed) > time.Second*50 {
 			lastTimeFullScanStatusRefreshed = time.Now()
@@ -292,6 +296,7 @@ func handleAssignFullScanRole(guildID int64, config *GeneralConfig, rolesAssigne
 	var uIDs []string
 	common.RedisPool.Do(radix.Cmd(&uIDs, "ZPOPMIN", RedisKeyFullScanAutoroleMembers(guildID), "10"))
 	uIDCount := len(uIDs)
+	logger.Info(fmt.Sprintf("Assigning role to %d members", uIDCount/2))
 	if uIDCount == 0 {
 		return true
 	}
@@ -300,6 +305,7 @@ func handleAssignFullScanRole(guildID int64, config *GeneralConfig, rolesAssigne
 	for _, v := range uIDs {
 		parsed, _ := strconv.ParseInt(v, 10, 64)
 		if parsed < 0 {
+			logger.Info(fmt.Sprintf("Invalid parsed value: %d", parsed))
 			continue
 		}
 		uIDsParsed = append(uIDsParsed, parsed)
@@ -312,10 +318,12 @@ func handleAssignFullScanRole(guildID int64, config *GeneralConfig, rolesAssigne
 			logger.WithError(err).WithField("user", ms.User.ID).WithField("guild", guildID).Error("failed adding autorole role")
 		}
 		if disabled {
+			logger.Info("assignRole returned disabled=true")
 			return true
 		}
 		*rolesAssigned += 1
 	}
+	logger.Info(fmt.Sprintf("Roles assigned: %d", *rolesAssigned))
 	err := common.RedisPool.Do(radix.Cmd(nil, "SETEX", RedisKeyFullScanAssignedRoles(guildID), "100", fmt.Sprintf("%d out of %d", *rolesAssigned, totalMembers)))
 	if err != nil {
 		logger.WithError(err).Error("Failed setting roles assigned count")
@@ -332,6 +340,7 @@ func assignFullScanAutorole(guildID int64, config *GeneralConfig) {
 
 	var totalMembers int
 	err = common.RedisPool.Do(radix.Cmd(&totalMembers, "ZCOUNT", RedisKeyFullScanAutoroleMembers(guildID), "-inf", "+inf"))
+	logger.Info(fmt.Sprintf("Roles will be assigned to %d members", totalMembers))
 	if err != nil {
 		logger.WithError(err).Error("Failed getting count of total members")
 	}
@@ -350,6 +359,7 @@ OUTER:
 			}
 		}
 		// Sleep for 1 second to prevent hitting discord's rate limits
+		logger.Info("Sleeping for 1 second")
 		time.Sleep(time.Second * 1)
 
 		if time.Since(lastTimeFullScanStatusRefreshed) > time.Second*50 {
