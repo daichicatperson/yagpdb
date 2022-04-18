@@ -210,6 +210,23 @@ func RedisKeyFullScanAssignedRoles(gID int64) string {
 	return "autorole_full_scan_assigned_roles:" + strconv.FormatInt(gID, 10)
 }
 
+func isFullScanCancelled(guildID int64) bool {
+	var status int
+	err := common.RedisPool.Do(radix.Cmd(&status, "GET", RedisKeyFullScanStatus(guildID)))
+	if err != nil {
+		logger.WithError(err).Error("Failed getting full scan status")
+	}
+	return status == FullScanCancelled
+}
+
+func stopFullScan(guildID int64) {
+	logger.WithField("guild", guildID).Info("Autorole full scan cancelled")
+	err := common.RedisPool.Do(radix.Cmd(nil, "DEL", RedisKeyFullScanStatus(guildID), RedisKeyFullScanAutoroleMembers(guildID), RedisKeyFullScanAssignedRoles(guildID)))
+	if err != nil {
+		logger.WithError(err).Error("Failed deleting the full scan related keys from redis")
+	}
+}
+
 func handleGuildChunk(evt *eventsystem.EventData) {
 	chunk := evt.GuildMembersChunk()
 	guildID := chunk.GuildID
@@ -233,6 +250,9 @@ func handleGuildChunk(evt *eventsystem.EventData) {
 // Iterate through all the members in the chunk, and add them to set, if autorole needs to be assigned to them
 func iterateGuildChunkMembers(guildID int64, config *GeneralConfig, chunk *discordgo.GuildMembersChunk) {
 	lastTimeFullScanStatusRefreshed := time.Now()
+	if isFullScanCancelled(guildID) {
+		return
+	}
 	err := common.RedisPool.Do(radix.Cmd(nil, "SETEX", RedisKeyFullScanStatus(chunk.GuildID), "100", strconv.Itoa(FullScanIterating)))
 	if err != nil {
 		logger.WithError(err).Error("Failed marking full scan iterating")
@@ -272,6 +292,10 @@ func iterateGuildChunkMembers(guildID int64, config *GeneralConfig, chunk *disco
 		logger.Info(fmt.Sprintf("Added %s to set", m.User.Username))
 
 		if time.Since(lastTimeFullScanStatusRefreshed) > time.Second*50 {
+			if isFullScanCancelled(guildID) {
+				stopFullScan(guildID)
+				return
+			}
 			lastTimeFullScanStatusRefreshed = time.Now()
 			err := common.RedisPool.Do(radix.Cmd(nil, "SETEX", RedisKeyFullScanStatus(chunk.GuildID), "100", strconv.Itoa(FullScanIterating)))
 			if err != nil {
@@ -281,6 +305,10 @@ func iterateGuildChunkMembers(guildID int64, config *GeneralConfig, chunk *disco
 	}
 
 	if chunk.ChunkIndex+1 == chunk.ChunkCount {
+		if isFullScanCancelled(guildID) {
+			stopFullScan(guildID)
+			return
+		}
 		// All chunks are processed, launching a go routine to start assigning autorole to the members in the set
 		err := common.RedisPool.Do(radix.Cmd(nil, "SETEX", RedisKeyFullScanStatus(chunk.GuildID), "10", strconv.Itoa(FullScanIterationDone)))
 		if err != nil {
@@ -305,7 +333,6 @@ func handleAssignFullScanRole(guildID int64, config *GeneralConfig, rolesAssigne
 	for _, v := range uIDs {
 		parsed, _ := strconv.ParseInt(v, 10, 64)
 		if parsed < 0 {
-			logger.Info(fmt.Sprintf("Invalid parsed value: %d", parsed))
 			continue
 		}
 		uIDsParsed = append(uIDsParsed, parsed)
@@ -328,7 +355,7 @@ func handleAssignFullScanRole(guildID int64, config *GeneralConfig, rolesAssigne
 	if err != nil {
 		logger.WithError(err).Error("Failed setting roles assigned count")
 	}
-	return false
+	return isFullScanCancelled(guildID)
 }
 
 func assignFullScanAutorole(guildID int64, config *GeneralConfig) {
@@ -346,21 +373,19 @@ func assignFullScanAutorole(guildID int64, config *GeneralConfig) {
 	}
 
 	rolesAssigned := 0
-OUTER:
 	for {
-		select {
-		case <-cancelFullScan:
-			logger.WithField("guild", guildID).Info("Full scan is cancelled by the user.")
-			break OUTER
-		default:
-			assignmentDone := handleAssignFullScanRole(guildID, config, &rolesAssigned, totalMembers)
-			if assignmentDone {
-				break OUTER
-			}
+		assignmentDone := handleAssignFullScanRole(guildID, config, &rolesAssigned, totalMembers)
+		if assignmentDone {
+			break
 		}
 		// Sleep for 1 second to prevent hitting discord's rate limits
 		logger.Info("Sleeping for 1 second")
 		time.Sleep(time.Second * 1)
+
+		if isFullScanCancelled(guildID) {
+			stopFullScan(guildID)
+			return
+		}
 
 		if time.Since(lastTimeFullScanStatusRefreshed) > time.Second*50 {
 			lastTimeFullScanStatusRefreshed = time.Now()
@@ -377,11 +402,11 @@ OUTER:
 	}
 }
 
-func WorkingOnFullScan(guildID int64) bool {
+func WorkingOnFullScanLegacy(guildID int64) bool {
 	var b bool
 	err := common.RedisPool.Do(radix.Cmd(&b, "EXISTS", RedisKeyGuildChunkProecssing(guildID)))
 	if err != nil {
-		logger.WithError(err).WithField("guild", guildID).Error("failed checking WorkingOnFullScan")
+		logger.WithError(err).WithField("guild", guildID).Error("failed checking WorkingOnFullScanLegacy")
 		return false
 	}
 
